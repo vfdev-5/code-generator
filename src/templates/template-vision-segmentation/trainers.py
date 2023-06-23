@@ -5,7 +5,7 @@ import torch
 from data import prepare_image_mask
 
 #::: if(it.deterministic) { :::#
-from ignite.engine import DeterministicEngine, Events  # usort: skip
+from ignite.engine import DeterministicEngine, Engine, Events  # usort: skip
 
 #::: } else { :::#
 from ignite.engine import Engine, Events
@@ -26,7 +26,7 @@ def setup_trainer(
     loss_fn: Module,
     device: Union[str, torch.device],
     train_sampler: Sampler,
-):
+) -> Union[Engine, DeterministicEngine]:
     prepare_batch = prepare_image_mask
     scaler = GradScaler(enabled=config.use_amp)
 
@@ -45,9 +45,12 @@ def setup_trainer(
             scaler.update()
             optimizer.zero_grad()
 
-        metric = {"epoch": engine.state.epoch, "train_loss": loss.item()}
-        engine.state.metrics = metric
-        return metric
+        train_loss = loss.item()
+        engine.state.metrics = {
+            "epoch": engine.state.epoch,
+            "train_loss": train_loss,
+        }
+        return {"train_loss": train_loss}
 
     #
     #::: if(it.deterministic) { :::#
@@ -70,11 +73,11 @@ def setup_evaluator(
     model: Module,
     metrics: Dict[str, Metric],
     device: Union[str, torch.device],
-):
+) -> Engine:
     prepare_batch = prepare_image_mask
 
     @torch.no_grad()
-    def evaluation_function(engine: Engine, batch: Any):
+    def eval_function(engine: Engine, batch: Any):
         model.eval()
 
         x, y = prepare_batch(batch, device, True)
@@ -84,7 +87,7 @@ def setup_evaluator(
 
         return y_pred, y
 
-    evaluator = Engine(evaluation_function)
+    evaluator = Engine(eval_function)
 
     for name, metric in metrics.items():
         metric.attach(evaluator, name)

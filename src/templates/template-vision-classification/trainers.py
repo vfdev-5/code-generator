@@ -4,13 +4,13 @@ import ignite.distributed as idist
 import torch
 
 #::: if(it.deterministic) { :::#
-from ignite.engine import DeterministicEngine, Events  # usort: skip
+from ignite.engine import DeterministicEngine, Engine, Events  # usort: skip
 
 #::: } else { :::#
 from ignite.engine import Engine, Events
 
 #::: } :::#
-from torch.cuda.amp import autocast
+from torch.cuda.amp import autocast, GradScaler
 from torch.nn import Module
 from torch.optim import Optimizer
 from torch.utils.data import DistributedSampler, Sampler
@@ -24,19 +24,23 @@ def setup_trainer(
     device: Union[str, torch.device],
     train_sampler: Sampler,
 ) -> Union[Engine, DeterministicEngine]:
+    scaler = GradScaler(enabled=config.use_amp)
+
     def train_function(engine: Union[Engine, DeterministicEngine], batch: Any):
         model.train()
 
-        samples = batch[0].to(device, non_blocking=True)
-        targets = batch[1].to(device, non_blocking=True)
+        x = batch[0].to(device, non_blocking=True)
+        y = batch[1].to(device, non_blocking=True)
 
         with autocast(config.use_amp):
-            outputs = model(samples)
-            loss = loss_fn(outputs, targets)
+            y_pred = model(x)
+            loss = loss_fn(y_pred, y) / config.accumulation_steps
 
-        loss.backward()
-        optimizer.step()
-        optimizer.zero_grad()
+        scaler.scale(loss).backward()
+        if engine.state.iteration % config.accumulation_steps == 0:
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad()
 
         train_loss = loss.item()
         engine.state.metrics = {
@@ -70,12 +74,12 @@ def setup_evaluator(
     def eval_function(engine: Engine, batch: Any):
         model.eval()
 
-        samples = batch[0].to(device, non_blocking=True)
-        targets = batch[1].to(device, non_blocking=True)
+        x = batch[0].to(device, non_blocking=True)
+        y = batch[1].to(device, non_blocking=True)
 
         with autocast(config.use_amp):
-            outputs = model(samples)
+            y_pred = model(x)
 
-        return outputs, targets
+        return y_pred, y
 
     return Engine(eval_function)
